@@ -1585,11 +1585,40 @@ func claudeExtraBody(raw json.RawMessage, tail string) string {
 	if tail != "" {
 		body["cache_control"] = cacheMark(tail)
 	}
-	if len(raw) > 0 {
-		body["safeguards"] = raw
+	if kept := safeguardsWithinCap(raw); kept != nil {
+		body["safeguards"] = kept
 	}
 	b, _ := json.Marshal(body)
 	return string(b)
+}
+
+// maxExtraBody stays well under MAX_ARG_STRLEN, the kernel's cap on one argv or
+// env string (128 KiB on Linux), with room for the rest of the environment.
+const maxExtraBody = 96 << 10
+
+// safeguardsWithinCap hands the safety field back in the largest form that
+// still fits a single env string. Claude Code caps its own payload at 256KB,
+// above the kernel's limit, and its prior_turn_context alone grows with every
+// turn: a long enough conversation pushed EXTRA_BODY past MAX_ARG_STRLEN, so
+// every spawn died with E2BIG and the gateway could only answer 502. What
+// varies turn to turn goes first, then the field altogether, so the run opens
+// either way.
+func safeguardsWithinCap(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	if extraBodyFits(raw) {
+		return raw
+	}
+	if kept := safeguardsKept(raw); extraBodyFits(kept) {
+		return kept
+	}
+	return nil
+}
+
+func extraBodyFits(raw json.RawMessage) bool {
+	b, err := json.Marshal(map[string]any{"safeguards": raw})
+	return err == nil && len(b) <= maxExtraBody
 }
 
 // safeguardVaries is what Claude Code's classifier context carries that
